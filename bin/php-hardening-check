@@ -1,0 +1,296 @@
+#!/usr/bin/env bash
+# ==============================================================================
+# PHP Hardening Kit - Server & Runtime Security Auditor (php-hardening-check)
+# Part of PHP-Hardening-Kit by Anton Barinov
+# https://github.com/Anton-Barinov/PHP-Hardening-Kit
+# ==============================================================================
+
+set -euo pipefail
+
+VERSION="1.0.0"
+JSON_OUTPUT=0
+QUIET=0
+FIX_HINTS=1
+
+# Color formatting
+if [ -t 1 ] && [ "${NO_COLOR:-0}" = "0" ]; then
+    RED='\033[0;31m'
+    GREEN='\033[0;32m'
+    YELLOW='\033[1;33m'
+    BLUE='\033[0;34m'
+    CYAN='\033[0;36m'
+    BOLD='\033[1m'
+    NC='\033[0m'
+else
+    RED=''
+    GREEN=''
+    YELLOW=''
+    BLUE=''
+    CYAN=''
+    BOLD=''
+    NC=''
+fi
+
+usage() {
+    cat <<EOF
+PHP-Hardening-Kit Auditor v${VERSION}
+Maintained by Anton Barinov <https://github.com/Anton-Barinov/PHP-Hardening-Kit>
+
+Usage:
+  php-hardening-check [options]
+
+Options:
+  --json          Output results in machine-readable JSON format for SIEM/CI/CD
+  --quiet, -q     Only output critical findings
+  --no-color      Disable ANSI color output
+  --help, -h      Display this help dialog
+  --version, -v   Print version information
+
+EOF
+    exit 0
+}
+
+# Parse command line flags
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --json) JSON_OUTPUT=1; shift ;;
+        --quiet|-q) QUIET=1; shift ;;
+        --no-color) RED=''; GREEN=''; YELLOW=''; BLUE=''; CYAN=''; BOLD=''; NC=''; shift ;;
+        --version|-v) echo "php-hardening-check v${VERSION}"; exit 0 ;;
+        --help|-h) usage ;;
+        *) echo "Unknown option: $1" >&2; usage ;;
+    esac
+done
+
+# Collect system info
+HOSTNAME=$(hostname 2>/dev/null || echo "unknown")
+KERNEL=$(uname -sr 2>/dev/null || echo "unknown")
+OS_NAME="Linux"
+if [ -f /etc/os-release ]; then
+    OS_NAME=$(grep '^PRETTY_NAME=' /etc/os-release | cut -d= -f2 | tr -d '"')
+elif [ "$(uname)" = "Darwin" ]; then
+    OS_NAME="macOS $(sw_vers -productVersion 2>/dev/null || true)"
+fi
+
+# Discover PHP binaries
+discover_php() {
+    local candidates=(
+        "/usr/bin/php"
+        "/usr/local/bin/php"
+        "/opt/homebrew/bin/php"
+        /usr/bin/php[5-8].[0-9]
+        /usr/local/bin/php[5-8].[0-9]
+        /opt/remi/php[5-8][0-9]/root/usr/bin/php
+        /www/server/php/[5-8][0-9]/bin/php
+        /opt/plesk/php/[5-8].[0-9]/bin/php
+        /opt/cpanel/ea-php[5-8][0-9]/root/usr/bin/php
+        /etc/alternatives/php
+    )
+
+    local found=()
+    for bin in "${candidates[@]}"; do
+        if [ -x "$bin" ]; then
+            # Deduplicate by realpath
+            local real
+            real=$(readlink -f "$bin" 2>/dev/null || realpath "$bin" 2>/dev/null || echo "$bin")
+            local exists=0
+            for item in "${found[@]}"; do
+                if [ "$item" = "$real" ]; then exists=1; break; fi
+            done
+            if [ $exists -eq 0 ]; then
+                found+=("$real")
+            fi
+        fi
+    done
+
+    # If no multi-paths found, fallback to which php
+    if [ ${#found[@]} -eq 0 ]; then
+        if command -v php >/dev/null 2>&1; then
+            local which_php
+            which_php=$(command -v php)
+            found+=("$which_php")
+        fi
+    fi
+
+    echo "${found[@]}"
+}
+
+# Audit a single PHP binary
+audit_php_binary() {
+    local php_bin="$1"
+    local ver
+    ver=$("$php_bin" -r 'echo PHP_VERSION;' 2>/dev/null || echo "0.0.0")
+    local ver_id
+    ver_id=$("$php_bin" -r 'echo PHP_VERSION_ID;' 2>/dev/null || echo "0")
+    local ini_file
+    ini_file=$("$php_bin" -r 'echo php_ini_loaded_file();' 2>/dev/null || echo "none")
+
+    # Vector 1: php2shell & Session Upload Progress (CVE-2026-109618, CVE-2026-109619, CVE-2026-115560)
+    local upload_progress
+    upload_progress=$("$php_bin" -r 'echo (int)ini_get("session.upload_progress.enabled");' 2>/dev/null || echo "0")
+    local vec1_status="PASS"
+    local vec1_detail="Safe: upload_progress is disabled"
+    if [ "$upload_progress" = "1" ]; then
+        if [ "$ver_id" -lt 80235 ] || { [ "$ver_id" -ge 80300 ] && [ "$ver_id" -lt 80336 ]; } || { [ "$ver_id" -ge 80400 ] && [ "$ver_id" -lt 80427 ]; } || { [ "$ver_id" -ge 80500 ] && [ "$ver_id" -lt 80512 ]; }; then
+            vec1_status="FAIL"
+            vec1_detail="CRITICAL: upload_progress enabled on vulnerable PHP ${ver} (CVE-2026-109618/19/60)"
+        else
+            vec1_status="WARN"
+            vec1_detail="upload_progress enabled; ensure upstream patch or minimal flag applied"
+        fi
+    fi
+
+    # Vector 2: CGI Argument Injection (CVE-2024-4577, CVE-2012-1823)
+    local allow_url_include
+    allow_url_include=$("$php_bin" -r 'echo (int)ini_get("allow_url_include");' 2>/dev/null || echo "0")
+    local vec2_status="PASS"
+    local vec2_detail="allow_url_include is Disabled"
+    if [ "$allow_url_include" = "1" ]; then
+        vec2_status="FAIL"
+        vec2_detail="CRITICAL: allow_url_include=On allows remote code execution via CGI arg injection"
+    fi
+
+    # Vector 3: Filter Chains (CVE-2024-2961) & Stream Wrappers
+    local allow_url_fopen
+    allow_url_fopen=$("$php_bin" -r 'echo (int)ini_get("allow_url_fopen");' 2>/dev/null || echo "1")
+    local vec3_status="PASS"
+    local vec3_detail="Remote stream wrappers monitored"
+    if [ "$allow_url_include" = "1" ] && [ "$allow_url_fopen" = "1" ]; then
+        vec3_status="FAIL"
+        vec3_detail="High risk: allow_url_fopen=On and allow_url_include=On enables filter-chain RCE"
+    fi
+
+    # Vector 4: Phar Deserialization (CVE-2018-17082)
+    local phar_readonly
+    phar_readonly=$("$php_bin" -r 'echo (int)ini_get("phar.readonly");' 2>/dev/null || echo "1")
+    local vec4_status="PASS"
+    local vec4_detail="phar.readonly is active"
+    if [ "$phar_readonly" = "0" ]; then
+        vec4_status="WARN"
+        vec4_detail="phar.readonly is disabled in php.ini; enable it to prevent phar generation"
+    fi
+
+    # Vector 5: Dangerous Functions & Mail Injection (CVE-2016-10033)
+    local disable_functions
+    disable_functions=$("$php_bin" -r 'echo ini_get("disable_functions");' 2>/dev/null || echo "")
+    local vec5_status="PASS"
+    local vec5_detail="Critical functions disabled"
+    if [ -z "$disable_functions" ]; then
+        vec5_status="WARN"
+        vec5_detail="disable_functions is empty; high risk of shell execution"
+    fi
+
+    # Check PHP-Hardening-Kit Runtime Guard installation
+    local auto_prepend
+    auto_prepend=$("$php_bin" -r 'echo ini_get("auto_prepend_file");' 2>/dev/null || echo "")
+    local guard_active="NO"
+    if [[ "$auto_prepend" =~ php-hardening-kit\.php ]]; then
+        guard_active="YES"
+    fi
+
+    # Check expose_php
+    local expose_php
+    expose_php=$("$php_bin" -r 'echo (int)ini_get("expose_php");' 2>/dev/null || echo "1")
+
+    # Output representation
+    echo "$php_bin|$ver|$ini_file|$guard_active|$vec1_status|$vec1_detail|$vec2_status|$vec2_detail|$vec3_status|$vec3_detail|$vec4_status|$vec4_detail|$vec5_status|$vec5_detail|$expose_php|$disable_functions"
+}
+
+# Main execution
+PHP_BINARIES=($(discover_php))
+
+if [ ${#PHP_BINARIES[@]} -eq 0 ]; then
+    echo -e "${RED}[ERROR] No PHP installations discovered on this system.${NC}" >&2
+    exit 1
+fi
+
+RESULTS=()
+for b in "${PHP_BINARIES[@]}"; do
+    if [ -x "$b" ]; then
+        res=$(audit_php_binary "$b")
+        RESULTS+=("$res")
+    fi
+done
+
+if [ "$JSON_OUTPUT" = "1" ]; then
+    echo "{"
+    echo "  \"scanner\": \"PHP-Hardening-Kit Auditor\","
+    echo "  \"version\": \"${VERSION}\","
+    echo "  \"timestamp\": \"$(date -u +"%Y-%m-%dT%H:%M:%SZ")\","
+    echo "  \"system\": {"
+    echo "    \"hostname\": \"${HOSTNAME}\","
+    echo "    \"os\": \"${OS_NAME}\","
+    echo "    \"kernel\": \"${KERNEL}\""
+    echo "  },"
+    echo "  \"runtimes\": ["
+    FIRST=1
+    for row in "${RESULTS[@]}"; do
+        IFS='|' read -r bin ver ini guard v1_st v1_dt v2_st v2_dt v3_st v3_dt v4_st v4_dt v5_st v5_dt exp dis <<< "$row"
+        [ $FIRST -eq 0 ] && echo ","
+        FIRST=0
+        cat <<EOF
+    {
+      "binary": "${bin}",
+      "version": "${ver}",
+      "ini_file": "${ini}",
+      "guard_active": "${guard}",
+      "expose_php": ${exp},
+      "checks": {
+        "vector1_php2shell": {"status": "${v1_st}", "detail": "${v1_dt}"},
+        "vector2_cgi_injection": {"status": "${v2_st}", "detail": "${v2_dt}"},
+        "vector3_filter_chains": {"status": "${v3_st}", "detail": "${v3_dt}"},
+        "vector4_phar_deserialization": {"status": "${v4_st}", "detail": "${v4_dt}"},
+        "vector5_dangerous_functions": {"status": "${v5_st}", "detail": "${v5_dt}"}
+      }
+    }
+EOF
+    done
+    echo "  ]"
+    echo "}"
+    exit 0
+fi
+
+# Human-readable visual output
+echo -e "${CYAN}======================================================================${NC}"
+echo -e "${BOLD}  PHP-Hardening-Kit — Security & Runtime Vulnerability Auditor v${VERSION}${NC}"
+echo -e "  Maintained by Anton Barinov | https://github.com/Anton-Barinov"
+echo -e "${CYAN}======================================================================${NC}"
+echo -e "Host: ${BOLD}${HOSTNAME}${NC} | OS: ${BOLD}${OS_NAME}${NC}"
+echo -e "Discovered PHP runtimes: ${BOLD}${#RESULTS[@]}${NC}\n"
+
+for row in "${RESULTS[@]}"; do
+    IFS='|' read -r bin ver ini guard v1_st v1_dt v2_st v2_dt v3_st v3_dt v4_st v4_dt v5_st v5_dt exp dis <<< "$row"
+
+    echo -e "${BLUE}▶ Runtime:${NC} ${BOLD}${bin}${NC} (PHP ${BOLD}${ver}${NC})"
+    echo -e "  Loaded INI: ${ini}"
+    if [ "$guard" = "YES" ]; then
+        echo -e "  Runtime Guard: ${GREEN}[INSTALLED & ACTIVE]${NC}"
+    else
+        echo -e "  Runtime Guard: ${YELLOW}[NOT INSTALLED]${NC} (Add auto_prepend_file to enable)"
+    fi
+
+    # Display Top 5 vectors
+    format_badge() {
+        case "$1" in
+            PASS) echo -e "${GREEN}[PASS]${NC}" ;;
+            WARN) echo -e "${YELLOW}[WARN]${NC}" ;;
+            FAIL) echo -e "${RED}[FAIL]${NC}" ;;
+            *)    echo -e "[$1]" ;;
+        esac
+    }
+
+    echo -e "  ├─ Vector 1 (php2shell / Multipart OOM & UAF): $(format_badge "$v1_st") $v1_dt"
+    echo -e "  ├─ Vector 2 (CGI Argument & Best-Fit Unicode): $(format_badge "$v2_st") $v2_dt"
+    echo -e "  ├─ Vector 3 (Filter Chains & Stream Wrappers): $(format_badge "$v3_st") $v3_dt"
+    echo -e "  ├─ Vector 4 (Phar Metadata & Object Injection): $(format_badge "$v4_st") $v4_dt"
+    echo -e "  └─ Vector 5 (Dangerous Functions & Shell Mail): $(format_badge "$v5_st") $v5_dt"
+    echo ""
+done
+
+echo -e "${CYAN}----------------------------------------------------------------------${NC}"
+echo -e "${BOLD}Remediation & Quick Hardening:${NC}"
+echo -e "  1. Install Runtime WAF Guard via auto_prepend_file:"
+echo -e "     ${CYAN}php-hardening-kit/scripts/install.sh --install${NC}"
+echo -e "  2. For full C-level patches on EOL PHP (5.4-8.1):"
+echo -e "     See: ${CYAN}https://github.com/Anton-Barinov/PHP-Hardening-Kit/tree/main/patches${NC}"
+echo -e "${CYAN}======================================================================${NC}"

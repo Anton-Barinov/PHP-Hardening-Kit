@@ -1,0 +1,58 @@
+# ==============================================================================
+# PHP-Hardening-Kit: Apache .htaccess Security Rules
+# Part of PHP-Hardening-Kit by Anton Barinov
+# https://github.com/Anton-Barinov/PHP-Hardening-Kit
+# ==============================================================================
+#
+# Paste these rules at the top of your webroot .htaccess or inside Apache <VirtualHost>
+#
+
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+
+    # 1. Block CVE-2024-4577 (Unicode Best-Fit / Soft-Hyphen) & CVE-2012-1823 CGI Arg Injection
+    RewriteCond %{QUERY_STRING} (%ad|%u00ad|\xad) [NC,OR]
+    RewriteCond %{THE_REQUEST} (%ad|%u00ad|\xad) [NC,OR]
+    RewriteCond %{QUERY_STRING} (^|&|\+|\s)-(?:d|s|w|f|n|c|b|-define|-syntax-check)\b [NC,OR]
+    RewriteCond %{QUERY_STRING} (allow_url_include|auto_prepend_file|auto_append_file|disable_functions)\s*= [NC]
+    RewriteRule .* - [F,L]
+
+    # 2. Block PHP Filter Chain Exploits (CVE-2024-2961) & Stream Wrappers
+    RewriteCond %{QUERY_STRING} (php://filter|expect://|data://|phar://) [NC]
+    RewriteRule .* - [F,L]
+
+    # 3. Block Null-Byte (%00) path truncation
+    RewriteCond %{THE_REQUEST} (%00|\x00) [NC]
+    RewriteRule .* - [F,L]
+
+    # 4. Block Shellshock User-Agent signatures
+    RewriteCond %{HTTP_USER_AGENT} \(\)\s*\{ [OR]
+    RewriteCond %{HTTP_REFERER} \(\)\s*\{
+    RewriteRule .* - [F,L]
+</IfModule>
+
+# 5. Prevent Execution of Scripts in Upload / Media Directories
+<IfModule mod_authz_core.c>
+    <FilesMatch "\.(php|php[0-9]|phtml|pl|py|jsp|asp|sh|cgi)$">
+        # In upload folders, this ensures scripts cannot execute
+    </FilesMatch>
+</IfModule>
+
+# 6. Block Sensitive Files
+<FilesMatch "(^\.env|\.git|\.svn|composer\.(json|lock)|package\.json|\.bak|\.sql)$">
+    <IfModule mod_authz_core.c>
+        Require all denied
+    </IfModule>
+    <IfModule !mod_authz_core.c>
+        Order allow,deny
+        Deny from all
+    </IfModule>
+</FilesMatch>
+
+# 7. Baseline Security Headers
+<IfModule mod_headers.c>
+    Header always set X-Content-Type-Options "nosniff"
+    Header always set X-Frame-Options "SAMEORIGIN"
+    Header always set X-XSS-Protection "1; mode=block"
+    Header always set Referrer-Policy "strict-origin-when-cross-origin"
+</IfModule>

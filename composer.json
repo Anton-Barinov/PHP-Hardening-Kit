@@ -1,0 +1,39 @@
+{
+  "name": "anton-barinov/php-hardening-kit",
+  "description": "Production-grade security hardening & hotfix toolkit for legacy and active PHP (5.4-8.4+). Neutralizes Top-5 critical attack vectors (php2shell, CGI arg injection, Phar deserialization, filter chains, mail abuse) with zero CMS code changes.",
+  "type": "library",
+  "license": "MIT",
+  "authors": [
+    {
+      "name": "Anton Barinov",
+      "homepage": "https://github.com/Anton-Barinov"
+    }
+  ],
+  "require": {
+    "php": ">=5.4.0"
+  },
+  "autoload": {
+    "files": [
+      "guard/php-hardening-kit.php"
+    ]
+  },
+  "bin": [
+    "bin/php-hardening-check"
+  ],
+  "keywords": [
+    "security",
+    "waf",
+    "hardening",
+    "php2shell",
+    "cve-2026-109618",
+    "cve-2024-4577",
+    "cve-2024-2961",
+    "cve-2018-17082",
+    "cve-2016-10033",
+    "opencart",
+    "wordpress",
+    "bitrix",
+    "legacy-php",
+    "patch"
+  ]
+}
