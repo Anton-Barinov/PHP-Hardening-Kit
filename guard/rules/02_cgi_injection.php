@@ -1,13 +1,13 @@
 <?php
 /**
  * Vector 2: CGI Argument Injection & Unicode Best-Fit Protection
- * Targets: CVE-2024-4577, CVE-2012-1823, Query Parameter Smuggling
+ * Targets: CVE-2024-4577, CVE-2012-1823, Query Parameter Smuggling & Overlong UTF-8
  * 
  * Part of PHP-Hardening-Kit by Anton Barinov
  */
 
 return function($guard) {
-    // Check raw query string from SERVER superglobals
+    // Check raw query string and URI from SERVER superglobals
     $queryString = isset($_SERVER['QUERY_STRING']) ? (string)$_SERVER['QUERY_STRING'] : '';
     $requestUri  = isset($_SERVER['REQUEST_URI']) ? (string)$_SERVER['REQUEST_URI'] : '';
 
@@ -15,23 +15,34 @@ return function($guard) {
         return null;
     }
 
-    // Exploit vector: Windows Best-Fit mapping (CVE-2024-4577)
-    // Attackers send %ad or \xad (soft hyphen) which Windows maps to ASCII '-' (0x2D)
-    if (preg_match('/(%ad|%u00ad|\xad)/i', $requestUri) || preg_match('/(%ad|%u00ad|\xad)/i', $queryString)) {
+    $rawTarget = $queryString . ' ' . $requestUri;
+
+    // 1. Exploit vector: Windows Best-Fit mapping (CVE-2024-4577)
+    // Attackers send %ad or \xad (soft hyphen) or Unicode variations which Windows maps to ASCII '-' (0x2D)
+    if (preg_match('/(%ad|%u00ad|\xad)/i', $rawTarget)) {
         return [
             'rule'    => 'VEC2_CGI_BESTFIT_INJECTION',
             'detail'  => 'Soft-hyphen / Unicode Best-Fit mapping exploit attempt detected (CVE-2024-4577)',
-            'payload' => substr($queryString !== '' ? $queryString : $requestUri, 0, 128),
+            'payload' => substr($rawTarget, 0, 128),
         ];
     }
 
-    // Exploit vector: CGI command-line argument injection (CVE-2012-1823 / CVE-2024-4577)
+    // 2. Overlong UTF-8 & Unicode traversal bypasses (%c0%af, %c1%9c, %u2215)
+    if (preg_match('/(%c0%af|%c1%9c|%c0%2f|%c0%5c|%u2215|%u2216)/i', $rawTarget)) {
+        return [
+            'rule'    => 'VEC2_OVERLONG_UTF8_TRAVERSAL',
+            'detail'  => 'Overlong UTF-8 or Unicode path traversal bypass attempt detected',
+            'payload' => substr($rawTarget, 0, 128),
+        ];
+    }
+
+    // 3. Exploit vector: CGI command-line argument injection (CVE-2012-1823 / CVE-2024-4577)
     // Attackers pass switches like -d, -s, -w, -f, -n, -c directly in query string
-    // e.g., ?+-d+allow_url_include%3d1 or ?-d+auto_prepend_file=php://input
     $patterns = [
         '/(?:^|&|\+|\s)-(?:d|s|w|f|n|c|b|-define|-syntax-check)\b/i',
         '/(?:^|&|\+|\s)%2d(?:d|s|w|f|n|c|b)/i',
         '/(?:allow_url_include|auto_prepend_file|auto_append_file|disable_functions)\s*=/i',
+        '/(?:auto_prepend_file|auto_append_file)\s*%3d/i',
     ];
 
     foreach ($patterns as $pattern) {
@@ -44,7 +55,7 @@ return function($guard) {
         }
     }
 
-    // Inspect argv in web environments (FastCGI/mod_php/FPM should never have argv argument injection)
+    // 4. Inspect argv in web environments
     if (isset($_SERVER['argv']) && is_array($_SERVER['argv']) && php_sapi_name() !== 'cli') {
         foreach ($_SERVER['argv'] as $arg) {
             if (is_string($arg) && preg_match('/^-(?:d|s|w|f|n|c)/i', ltrim($arg))) {

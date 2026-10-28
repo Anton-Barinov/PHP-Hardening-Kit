@@ -7,10 +7,11 @@
 
 set -euo pipefail
 
-VERSION="1.0.0"
+VERSION="1.1.0"
 JSON_OUTPUT=0
 QUIET=0
-FIX_HINTS=1
+FIX_CONFIG=0
+REMOTE_URL=""
 
 # Color formatting
 if [ -t 1 ] && [ "${NO_COLOR:-0}" = "0" ]; then
@@ -41,6 +42,8 @@ Usage:
 
 Options:
   --json          Output results in machine-readable JSON format for SIEM/CI/CD
+  --url <URL>     Perform non-destructive remote web probe against target URL
+  --fix-config    Generate copy-paste remediation commands for discovered php.ini files
   --quiet, -q     Only output critical findings
   --no-color      Disable ANSI color output
   --help, -h      Display this help dialog
@@ -54,6 +57,8 @@ EOF
 while [ $# -gt 0 ]; do
     case "$1" in
         --json) JSON_OUTPUT=1; shift ;;
+        --url) REMOTE_URL="$2"; shift 2 ;;
+        --fix-config) FIX_CONFIG=1; shift ;;
         --quiet|-q) QUIET=1; shift ;;
         --no-color) RED=''; GREEN=''; YELLOW=''; BLUE=''; CYAN=''; BOLD=''; NC=''; shift ;;
         --version|-v) echo "php-hardening-check v${VERSION}"; exit 0 ;;
@@ -61,6 +66,53 @@ while [ $# -gt 0 ]; do
         *) echo "Unknown option: $1" >&2; usage ;;
     esac
 done
+
+# Remote Web Audit Mode
+if [ -n "$REMOTE_URL" ]; then
+    echo -e "${CYAN}=== Performing Non-Destructive Remote Web Audit ===${NC}"
+    echo -e "Target URL: ${BOLD}${REMOTE_URL}${NC}\n"
+
+    # 1. Baseline Request
+    BASE_HEADERS=$(curl -sSL -I -m 5 "${REMOTE_URL}" 2>/dev/null || true)
+    SERVER_HEADER=$(echo "$BASE_HEADERS" | grep -i '^server:' | tr -d '\r' || echo "Server: Hidden")
+    X_POWERED_BY=$(echo "$BASE_HEADERS" | grep -i '^x-powered-by:' | tr -d '\r' || echo "None")
+    X_PROTECTED=$(echo "$BASE_HEADERS" | grep -i '^x-protected-by:' | tr -d '\r' || echo "None")
+
+    echo -e "  Server:        ${SERVER_HEADER}"
+    echo -e "  X-Powered-By:  ${X_POWERED_BY}"
+    if [[ "$X_PROTECTED" =~ PHP-Hardening-Kit ]]; then
+        echo -e "  Runtime Guard: ${GREEN}[ACTIVE: PHP-Hardening-Kit Detected]${NC}"
+    else
+        echo -e "  Runtime Guard: ${YELLOW}[NOT DETECTED]${NC}"
+    fi
+
+    # 2. Probe CGI Arg Injection (CVE-2024-4577 & CVE-2012-1823)
+    PROBE1_STATUS=$(curl -s -o /dev/null -w "%{http_code}" -m 5 "${REMOTE_URL}?%ad-d+allow_url_include=1" 2>/dev/null || echo "000")
+    if [ "$PROBE1_STATUS" = "403" ]; then
+        echo -e "  ├─ CVE-2024-4577 (%ad probe):          ${GREEN}[BLOCKED: HTTP 403]${NC}"
+    else
+        echo -e "  ├─ CVE-2024-4577 (%ad probe):          ${YELLOW}[STATUS: HTTP ${PROBE1_STATUS}]${NC}"
+    fi
+
+    # 3. Probe Filter Chains (CVE-2024-2961)
+    PROBE2_STATUS=$(curl -s -o /dev/null -w "%{http_code}" -m 5 "${REMOTE_URL}?test=php://filter/read=convert.iconv.utf-8.utf-16/resource=convert.base64-decode/resource=data" 2>/dev/null || echo "000")
+    if [ "$PROBE2_STATUS" = "403" ]; then
+        echo -e "  ├─ CVE-2024-2961 (filter chain probe): ${GREEN}[BLOCKED: HTTP 403]${NC}"
+    else
+        echo -e "  ├─ CVE-2024-2961 (filter chain probe): ${YELLOW}[STATUS: HTTP ${PROBE2_STATUS}]${NC}"
+    fi
+
+    # 4. Probe Phar Wrapper
+    PROBE3_STATUS=$(curl -s -o /dev/null -w "%{http_code}" -m 5 "${REMOTE_URL}?file=phar:///tmp/fake.phar" 2>/dev/null || echo "000")
+    if [ "$PROBE3_STATUS" = "403" ]; then
+        echo -e "  └─ CVE-2018-17082 (phar:// wrapper):   ${GREEN}[BLOCKED: HTTP 403]${NC}"
+    else
+        echo -e "  └─ CVE-2018-17082 (phar:// wrapper):   ${YELLOW}[STATUS: HTTP ${PROBE3_STATUS}]${NC}"
+    fi
+
+    echo -e "\n${CYAN}====================================================${NC}"
+    exit 0
+fi
 
 # Collect system info
 HOSTNAME=$(hostname 2>/dev/null || echo "unknown")
@@ -90,7 +142,6 @@ discover_php() {
     local found=()
     for bin in "${candidates[@]}"; do
         if [ -x "$bin" ]; then
-            # Deduplicate by realpath
             local real
             real=$(readlink -f "$bin" 2>/dev/null || realpath "$bin" 2>/dev/null || echo "$bin")
             local exists=0
@@ -103,7 +154,6 @@ discover_php() {
         fi
     done
 
-    # If no multi-paths found, fallback to which php
     if [ ${#found[@]} -eq 0 ]; then
         if command -v php >/dev/null 2>&1; then
             local which_php
@@ -125,18 +175,28 @@ audit_php_binary() {
     local ini_file
     ini_file=$("$php_bin" -r 'echo php_ini_loaded_file();' 2>/dev/null || echo "none")
 
+    # Binary Patch Signature Inspection (Signals from C-level backports)
+    local c_patch="NO"
+    if grep -a -q "incomplete_classes_only" "$php_bin" 2>/dev/null || grep -a -q "php_session_rfc1867_sync_counters" "$php_bin" 2>/dev/null; then
+        c_patch="YES"
+    fi
+
     # Vector 1: php2shell & Session Upload Progress (CVE-2026-109618, CVE-2026-109619, CVE-2026-115560)
     local upload_progress
     upload_progress=$("$php_bin" -r 'echo (int)ini_get("session.upload_progress.enabled");' 2>/dev/null || echo "0")
     local vec1_status="PASS"
     local vec1_detail="Safe: upload_progress is disabled"
-    if [ "$upload_progress" = "1" ]; then
+
+    if [ "$c_patch" = "YES" ]; then
+        vec1_status="PASS"
+        vec1_detail="PATCHED: C-level backport verified in binary (CVE-2026-109618/19/60)"
+    elif [ "$upload_progress" = "1" ]; then
         if [ "$ver_id" -lt 80235 ] || { [ "$ver_id" -ge 80300 ] && [ "$ver_id" -lt 80336 ]; } || { [ "$ver_id" -ge 80400 ] && [ "$ver_id" -lt 80427 ]; } || { [ "$ver_id" -ge 80500 ] && [ "$ver_id" -lt 80512 ]; }; then
             vec1_status="FAIL"
-            vec1_detail="CRITICAL: upload_progress enabled on vulnerable PHP ${ver} (CVE-2026-109618/19/60)"
+            vec1_detail="CRITICAL: upload_progress enabled on vulnerable PHP ${ver} without patch"
         else
             vec1_status="WARN"
-            vec1_detail="upload_progress enabled; ensure upstream patch or minimal flag applied"
+            vec1_detail="upload_progress enabled; official upstream release active"
         fi
     fi
 
@@ -167,7 +227,7 @@ audit_php_binary() {
     local vec4_detail="phar.readonly is active"
     if [ "$phar_readonly" = "0" ]; then
         vec4_status="WARN"
-        vec4_detail="phar.readonly is disabled in php.ini; enable it to prevent phar generation"
+        vec4_detail="phar.readonly is disabled in php.ini"
     fi
 
     # Vector 5: Dangerous Functions & Mail Injection (CVE-2016-10033)
@@ -192,8 +252,8 @@ audit_php_binary() {
     local expose_php
     expose_php=$("$php_bin" -r 'echo (int)ini_get("expose_php");' 2>/dev/null || echo "1")
 
-    # Output representation
-    echo "$php_bin|$ver|$ini_file|$guard_active|$vec1_status|$vec1_detail|$vec2_status|$vec2_detail|$vec3_status|$vec3_detail|$vec4_status|$vec4_detail|$vec5_status|$vec5_detail|$expose_php|$disable_functions"
+    # Output structured data
+    echo "$php_bin|$ver|$ini_file|$guard_active|$c_patch|$vec1_status|$vec1_detail|$vec2_status|$vec2_detail|$vec3_status|$vec3_detail|$vec4_status|$vec4_detail|$vec5_status|$vec5_detail|$expose_php|$disable_functions"
 }
 
 # Main execution
@@ -212,6 +272,25 @@ for b in "${PHP_BINARIES[@]}"; do
     fi
 done
 
+if [ "$FIX_CONFIG" = "1" ]; then
+    echo -e "${CYAN}=== Generated Emergency Remediation Commands ===${NC}\n"
+    for row in "${RESULTS[@]}"; do
+        IFS='|' read -r bin ver ini guard c_patch v1_st v1_dt v2_st v2_dt v3_st v3_dt v4_st v4_dt v5_st v5_dt exp dis <<< "$row"
+        if [ "$ini" != "none" ] && [ -w "$ini" ]; then
+            echo -e "# Securing ${ini} (PHP ${ver}):"
+            echo "sed -i.bak 's/^session.upload_progress.enabled.*/session.upload_progress.enabled = Off/' \"${ini}\""
+            echo "sed -i.bak 's/^allow_url_include.*/allow_url_include = Off/' \"${ini}\""
+            echo "sed -i.bak 's/^expose_php.*/expose_php = Off/' \"${ini}\""
+            echo ""
+        else
+            echo -e "# Notice: ${ini} requires sudo or write permissions to edit directly."
+            echo "sudo sed -i.bak 's/^session.upload_progress.enabled.*/session.upload_progress.enabled = Off/' \"${ini}\""
+            echo ""
+        fi
+    done
+    exit 0
+fi
+
 if [ "$JSON_OUTPUT" = "1" ]; then
     echo "{"
     echo "  \"scanner\": \"PHP-Hardening-Kit Auditor\","
@@ -225,7 +304,7 @@ if [ "$JSON_OUTPUT" = "1" ]; then
     echo "  \"runtimes\": ["
     FIRST=1
     for row in "${RESULTS[@]}"; do
-        IFS='|' read -r bin ver ini guard v1_st v1_dt v2_st v2_dt v3_st v3_dt v4_st v4_dt v5_st v5_dt exp dis <<< "$row"
+        IFS='|' read -r bin ver ini guard c_patch v1_st v1_dt v2_st v2_dt v3_st v3_dt v4_st v4_dt v5_st v5_dt exp dis <<< "$row"
         [ $FIRST -eq 0 ] && echo ","
         FIRST=0
         cat <<EOF
@@ -234,6 +313,7 @@ if [ "$JSON_OUTPUT" = "1" ]; then
       "version": "${ver}",
       "ini_file": "${ini}",
       "guard_active": "${guard}",
+      "c_patch_present": "${c_patch}",
       "expose_php": ${exp},
       "checks": {
         "vector1_php2shell": {"status": "${v1_st}", "detail": "${v1_dt}"},
@@ -259,17 +339,21 @@ echo -e "Host: ${BOLD}${HOSTNAME}${NC} | OS: ${BOLD}${OS_NAME}${NC}"
 echo -e "Discovered PHP runtimes: ${BOLD}${#RESULTS[@]}${NC}\n"
 
 for row in "${RESULTS[@]}"; do
-    IFS='|' read -r bin ver ini guard v1_st v1_dt v2_st v2_dt v3_st v3_dt v4_st v4_dt v5_st v5_dt exp dis <<< "$row"
+    IFS='|' read -r bin ver ini guard c_patch v1_st v1_dt v2_st v2_dt v3_st v3_dt v4_st v4_dt v5_st v5_dt exp dis <<< "$row"
 
     echo -e "${BLUE}▶ Runtime:${NC} ${BOLD}${bin}${NC} (PHP ${BOLD}${ver}${NC})"
     echo -e "  Loaded INI: ${ini}"
     if [ "$guard" = "YES" ]; then
-        echo -e "  Runtime Guard: ${GREEN}[INSTALLED & ACTIVE]${NC}"
+        echo -e "  Runtime Guard:   ${GREEN}[INSTALLED & ACTIVE]${NC}"
     else
-        echo -e "  Runtime Guard: ${YELLOW}[NOT INSTALLED]${NC} (Add auto_prepend_file to enable)"
+        echo -e "  Runtime Guard:   ${YELLOW}[NOT INSTALLED]${NC} (Add auto_prepend_file to enable)"
+    fi
+    if [ "$c_patch" = "YES" ]; then
+        echo -e "  C-Level Patch:   ${GREEN}[VERIFIED IN BINARY]${NC}"
+    else
+        echo -e "  C-Level Patch:   ${YELLOW}[NONE]${NC}"
     fi
 
-    # Display Top 5 vectors
     format_badge() {
         case "$1" in
             PASS) echo -e "${GREEN}[PASS]${NC}" ;;
@@ -291,6 +375,8 @@ echo -e "${CYAN}----------------------------------------------------------------
 echo -e "${BOLD}Remediation & Quick Hardening:${NC}"
 echo -e "  1. Install Runtime WAF Guard via auto_prepend_file:"
 echo -e "     ${CYAN}php-hardening-kit/scripts/install.sh --install${NC}"
-echo -e "  2. For full C-level patches on EOL PHP (5.4-8.1):"
+echo -e "  2. Generate emergency fix commands for php.ini:"
+echo -e "     ${CYAN}php-hardening-kit/bin/php-hardening-check --fix-config${NC}"
+echo -e "  3. For full C-level patches on EOL PHP (5.4-8.1):"
 echo -e "     See: ${CYAN}https://github.com/Anton-Barinov/PHP-Hardening-Kit/tree/main/patches${NC}"
 echo -e "${CYAN}======================================================================${NC}"

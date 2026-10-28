@@ -47,10 +47,19 @@ Audit your server across all multi-PHP stacks (CLI, FPM, cgi, aaPanel, HestiaCP,
 curl -fsSL https://raw.githubusercontent.com/Anton-Barinov/PHP-Hardening-Kit/main/bin/php-hardening-check | bash
 ```
 
-For machine-readable JSON output (ideal for SIEM, Datadog, Prometheus, CI/CD):
-```bash
-./bin/php-hardening-check --json
-```
+### Advanced Auditor Modes:
+* **Generate Emergency Remediation Commands for `php.ini`:**
+  ```bash
+  ./bin/php-hardening-check --fix-config
+  ```
+* **Non-Destructive Remote Web Audit against a live domain:**
+  ```bash
+  ./bin/php-hardening-check --url https://my-store.com
+  ```
+* **Machine-Readable JSON Output (for SIEM, Datadog, Prometheus, CI/CD):**
+  ```bash
+  ./bin/php-hardening-check --json
+  ```
 
 ---
 

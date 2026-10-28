@@ -90,6 +90,13 @@ class PhpHardeningGuard
             return;
         }
 
+        // Fast Host Header & Request Smuggling validation
+        $hostViolation = $this->validateHostHeader();
+        if ($hostViolation !== null) {
+            $this->handleViolation($hostViolation);
+            return;
+        }
+
         $rules = [
             'php2shell'            => __DIR__ . '/rules/01_php2shell.php',
             'cgi_injection'        => __DIR__ . '/rules/02_cgi_injection.php',
@@ -116,6 +123,38 @@ class PhpHardeningGuard
                 }
             }
         }
+    }
+
+    public function validateHostHeader()
+    {
+        if (!isset($_SERVER['HTTP_HOST'])) {
+            return null;
+        }
+
+        $host = (string)$_SERVER['HTTP_HOST'];
+        if ($host === '') {
+            return null;
+        }
+
+        // Reject newlines, carriage returns, null bytes (HTTP response splitting & request smuggling)
+        if (preg_match('/[\r\n\0]/', $host)) {
+            return [
+                'rule'    => 'HOST_HEADER_INJECTION',
+                'detail'  => 'Newline or null byte detected in HTTP Host header',
+                'payload' => substr($host, 0, 64),
+            ];
+        }
+
+        // Reject invalid host format (must be alphanumeric, dots, hyphens, and optional port :8080)
+        if (!preg_match('/^[a-zA-Z0-9.\-_]+(?::\d{1,5})?$/', $host)) {
+            return [
+                'rule'    => 'MALFORMED_HOST_HEADER',
+                'detail'  => 'Illegal characters in HTTP Host header',
+                'payload' => substr($host, 0, 64),
+            ];
+        }
+
+        return null;
     }
 
     public function getClientIp()

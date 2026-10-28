@@ -54,12 +54,12 @@ return function($guard) {
         }
 
         // Exploit vector: Arbitrary code execution via remote stream wrappers in user input
-        if (preg_match('/(?:expect|input|data):\/\//i', $decoded)) {
-            // Check if wrapper is in suspicious context (e.g. data://text/plain;base64)
-            if (preg_match('/data:(?:text\/plain|application\/octet-stream)[^,]*;base64/i', $decoded)) {
+        if (preg_match('/(?:expect|input):\/\/|data:(?:\/\/)?/i', $decoded)) {
+            // Check if wrapper is in suspicious context (e.g. data:text/plain;base64 or data://text/plain)
+            if (preg_match('/data:(?:\/\/)?(?:text\/plain|application\/octet-stream)[^,]*,/i', $decoded) || preg_match('/data:[^,]*;base64/i', $decoded)) {
                 $ruleOut = [
                     'rule'    => 'VEC3_DATA_WRAPPER_EXECUTION',
-                    'detail'  => 'data:// stream wrapper with base64 payload detected',
+                    'detail'  => 'data:// stream wrapper with payload detected',
                     'payload' => substr($decoded, 0, 128),
                 ];
                 return $ruleOut;
