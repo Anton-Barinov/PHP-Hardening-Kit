@@ -280,6 +280,7 @@ GitHub: [@Anton-Barinov](https://github.com/Anton-Barinov)
 
 If you find this toolkit valuable for safeguarding your infrastructure, please **★ Star the repository** and explore the broader security & tooling ecosystem:
 
+- **[Franken-Leak-Hunter](https://github.com/Anton-Barinov/Franken-Leak-Hunter)**: Memory leak and cross-request state pollution detector for FrankenPHP, RoadRunner, and Laravel Octane.
 - **[EOL-PHP-Armor](https://github.com/Anton-Barinov/EOL-PHP-Armor)**: 1-line automated security hub & hotpatching engine for EOL PHP (5.4–8.1) with C-patches and instant runtime shield.
 - **[php2shell-patches](https://github.com/Anton-Barinov/php2shell-patches)**: Backported C-patches for CVE-2026-109618 / CVE-2026-109619.
 - **[EOL-PHP-SecAuto](https://github.com/Anton-Barinov/EOL-PHP-SecAuto)**: Automated hardened Dockerfile generator for legacy PHP runtimes.
