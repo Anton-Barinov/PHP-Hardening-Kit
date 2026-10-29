@@ -46,7 +46,23 @@ return function($guard) {
         }
     }
 
-    // 3. Inspect filenames in $_FILES for null byte injection / path traversal
+    // 3. Inspect Content-Type for malformed multipart boundaries
+    if (isset($_SERVER['CONTENT_TYPE']) && stripos($_SERVER['CONTENT_TYPE'], 'multipart/') !== false) {
+        $ct = $_SERVER['CONTENT_TYPE'];
+        if (preg_match('/boundary\s*=\s*(.+)$/i', $ct, $matches)) {
+            $rawBoundary = $matches[1];
+            // RFC 2046 boundary validation: reject shell metacharacters, separators, null bytes, newlines
+            if (preg_match('/[;\$`|&><\r\n\0]/', $rawBoundary) || strlen($rawBoundary) > 256) {
+                return [
+                    'rule'    => 'VEC1_MALFORMED_MULTIPART_BOUNDARY',
+                    'detail'  => 'Malicious characters or shell separators detected in multipart boundary',
+                    'payload' => substr($rawBoundary, 0, 64),
+                ];
+            }
+        }
+    }
+
+    // 4. Inspect filenames in $_FILES for null byte injection / path traversal
     if (!empty($_FILES)) {
         foreach ($_FILES as $field => $data) {
             $names = isset($data['name']) ? (array)$data['name'] : [];
@@ -54,12 +70,20 @@ return function($guard) {
                 if (!is_string($filename)) {
                     continue;
                 }
-                // Check for null bytes or illegal characters in uploaded filename
-                if (strpos($filename, "\0") !== false) {
+                // Check for null bytes in uploaded filename
+                if (strpos($filename, "\0") !== false || stripos($filename, '%00') !== false) {
                     return [
                         'rule'    => 'VEC1_NULL_BYTE_FILENAME',
                         'detail'  => 'Null byte detected in uploaded filename',
                         'payload' => $filename,
+                    ];
+                }
+                // Check for directory traversal sequences in uploaded filename
+                if (strpos($filename, '..') !== false || strpos($filename, '/') !== false || strpos($filename, '\\') !== false) {
+                    return [
+                        'rule'    => 'VEC1_UPLOAD_PATH_TRAVERSAL',
+                        'detail'  => 'Directory traversal sequence detected in uploaded filename',
+                        'payload' => substr($filename, 0, 64),
                     ];
                 }
             }

@@ -7,15 +7,17 @@
  */
 
 return function($guard) {
-    // Check raw query string and URI from SERVER superglobals
+    // Check raw query string, URI, and rewrite/original headers from SERVER superglobals
     $queryString = isset($_SERVER['QUERY_STRING']) ? (string)$_SERVER['QUERY_STRING'] : '';
     $requestUri  = isset($_SERVER['REQUEST_URI']) ? (string)$_SERVER['REQUEST_URI'] : '';
+    $xOrigUrl    = isset($_SERVER['HTTP_X_ORIGINAL_URL']) ? (string)$_SERVER['HTTP_X_ORIGINAL_URL'] : '';
+    $xRewriteUrl = isset($_SERVER['HTTP_X_REWRITE_URL']) ? (string)$_SERVER['HTTP_X_REWRITE_URL'] : '';
 
-    if ($queryString === '' && $requestUri === '') {
+    if ($queryString === '' && $requestUri === '' && $xOrigUrl === '' && $xRewriteUrl === '') {
         return null;
     }
 
-    $rawTarget = $queryString . ' ' . $requestUri;
+    $rawTarget = $queryString . ' ' . $requestUri . ' ' . $xOrigUrl . ' ' . $xRewriteUrl;
 
     // 1. Exploit vector: Windows Best-Fit mapping (CVE-2024-4577)
     // Attackers send %ad or \xad (soft hyphen) or Unicode variations which Windows maps to ASCII '-' (0x2D)
@@ -45,12 +47,16 @@ return function($guard) {
         '/(?:auto_prepend_file|auto_append_file)\s*%3d/i',
     ];
 
+    $targetToScan = $queryString . ' ' . $xOrigUrl . ' ' . $xRewriteUrl;
+    $decoded1 = urldecode($targetToScan);
+    $decoded2 = urldecode($decoded1);
+
     foreach ($patterns as $pattern) {
-        if (preg_match($pattern, $queryString) || preg_match($pattern, urldecode($queryString))) {
+        if (preg_match($pattern, $targetToScan) || preg_match($pattern, $decoded1) || preg_match($pattern, $decoded2)) {
             return [
                 'rule'    => 'VEC2_CGI_ARGUMENT_INJECTION',
                 'detail'  => 'CGI command-line parameter injection attempt detected',
-                'payload' => substr($queryString, 0, 128),
+                'payload' => substr($targetToScan, 0, 128),
             ];
         }
     }

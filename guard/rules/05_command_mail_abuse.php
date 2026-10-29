@@ -17,13 +17,22 @@ return function($guard) {
             return null;
         }
 
-        if (is_string($value) && (strpos($value, "\0") !== false || stripos($value, '%00') !== false)) {
-            $ruleOut = [
-                'rule'    => 'VEC5_NULL_BYTE_POISONING',
-                'detail'  => 'Null byte (%00) path truncation attempt detected',
-                'payload' => substr($value, 0, 64),
-            ];
-            return $ruleOut;
+        if (is_string($value)) {
+            $norm = $value;
+            for ($p = 0; $p < 3; $p++) {
+                if (strpos($norm, '%') === false) break;
+                $prev = $norm;
+                $norm = rawurldecode($norm);
+                if ($norm === $prev) break;
+            }
+            if (strpos($value, "\0") !== false || stripos($value, '%00') !== false || strpos($norm, "\0") !== false || stripos($norm, '%00') !== false) {
+                $ruleOut = [
+                    'rule'    => 'VEC5_NULL_BYTE_POISONING',
+                    'detail'  => 'Null byte (%00) path truncation attempt detected',
+                    'payload' => substr($value, 0, 64),
+                ];
+                return $ruleOut;
+            }
         }
         return null;
     };

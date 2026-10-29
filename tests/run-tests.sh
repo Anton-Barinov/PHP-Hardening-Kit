@@ -17,7 +17,10 @@ php "${SCRIPT_DIR}/ExploitVectorTests.php"
 echo -e "\n2. Running Legitimate Traffic & False-Positive Tests..."
 php "${SCRIPT_DIR}/LegitimateTrafficTest.php"
 
-echo -e "\n3. Running Performance Benchmark..."
+echo -e "\n3. Running Chaos & Adversarial Exploit Tests..."
+php "${SCRIPT_DIR}/ChaosExploitTest.php"
+
+echo -e "\n4. Running Performance Benchmark..."
 php "${SCRIPT_DIR}/benchmark.php"
 
 echo -e "\nAll tests & benchmarks completed successfully!"

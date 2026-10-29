@@ -11,6 +11,7 @@ echo "=========================================\n\n";
 $tests = [
     'ExploitVectorTests.php',
     'LegitimateTrafficTest.php',
+    'ChaosExploitTest.php',
     'benchmark.php',
 ];
 

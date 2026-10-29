@@ -20,6 +20,7 @@ define('PHP_HARDENING_KIT_VERSION', '1.0.0');
 class PhpHardeningGuard
 {
     private static $instance = null;
+    private static $cachedRules = null;
     private $config = [];
     private $startTime = 0;
 
@@ -30,6 +31,39 @@ class PhpHardeningGuard
             self::$instance->run();
         }
         return self::$instance;
+    }
+
+    public static function getRuleCheckers()
+    {
+        if (self::$cachedRules === null) {
+            self::$cachedRules = [
+                'php2shell'            => require __DIR__ . '/rules/01_php2shell.php',
+                'cgi_injection'        => require __DIR__ . '/rules/02_cgi_injection.php',
+                'filter_chains'        => require __DIR__ . '/rules/03_filter_chains.php',
+                'phar_deserialization' => require __DIR__ . '/rules/04_phar_deserialization.php',
+                'command_mail_abuse'   => require __DIR__ . '/rules/05_command_mail_abuse.php',
+            ];
+        }
+        return self::$cachedRules;
+    }
+
+    public static function normalizeUrlString($value, $maxPasses = 3)
+    {
+        if (!is_string($value)) {
+            return $value;
+        }
+        $curr = $value;
+        for ($i = 0; $i < $maxPasses; $i++) {
+            if (strpos($curr, '%') === false) {
+                break;
+            }
+            $prev = $curr;
+            $curr = rawurldecode($curr);
+            if ($curr === $prev) {
+                break;
+            }
+        }
+        return $curr;
     }
 
     public function __construct()
@@ -90,31 +124,27 @@ class PhpHardeningGuard
             return;
         }
 
-        // Fast Host Header & Request Smuggling validation
+        // Fast Header Bomb & Request Smuggling validation
+        $bombViolation = $this->validateHeaderBomb();
+        if ($bombViolation !== null) {
+            $this->handleViolation($bombViolation);
+            return;
+        }
+
+        // Fast Host Header validation
         $hostViolation = $this->validateHostHeader();
         if ($hostViolation !== null) {
             $this->handleViolation($hostViolation);
             return;
         }
 
-        $rules = [
-            'php2shell'            => __DIR__ . '/rules/01_php2shell.php',
-            'cgi_injection'        => __DIR__ . '/rules/02_cgi_injection.php',
-            'filter_chains'        => __DIR__ . '/rules/03_filter_chains.php',
-            'phar_deserialization' => __DIR__ . '/rules/04_phar_deserialization.php',
-            'command_mail_abuse'   => __DIR__ . '/rules/05_command_mail_abuse.php',
-        ];
+        $checkers = self::getRuleCheckers();
 
-        foreach ($rules as $ruleName => $ruleFile) {
+        foreach ($checkers as $ruleName => $checker) {
             if (isset($this->config['rules'][$ruleName]) && !$this->config['rules'][$ruleName]) {
                 continue;
             }
 
-            if (!file_exists($ruleFile)) {
-                continue;
-            }
-
-            $checker = require $ruleFile;
             if (is_callable($checker)) {
                 $violation = call_user_func($checker, $this);
                 if ($violation !== null && is_array($violation)) {
@@ -125,33 +155,71 @@ class PhpHardeningGuard
         }
     }
 
+    public function validateHeaderBomb()
+    {
+        $totalHeaderBytes = 0;
+        foreach ($_SERVER as $key => $val) {
+            if (!is_string($val)) {
+                continue;
+            }
+            if (strncmp($key, 'HTTP_', 5) === 0 || $key === 'CONTENT_TYPE' || $key === 'CONTENT_LENGTH') {
+                $len = strlen($val);
+                if ($len > 32768) {
+                    return [
+                        'rule'    => 'HTTP_HEADER_BOMB',
+                        'detail'  => 'Oversized HTTP header detected (' . $key . ': ' . $len . ' bytes)',
+                        'payload' => substr($val, 0, 64),
+                    ];
+                }
+                $totalHeaderBytes += $len;
+            }
+        }
+        if ($totalHeaderBytes > 65536) {
+            return [
+                'rule'    => 'HTTP_HEADER_BOMB',
+                'detail'  => 'Total HTTP headers size exceeds safe threshold (' . $totalHeaderBytes . ' bytes)',
+                'payload' => 'total_bytes=' . $totalHeaderBytes,
+            ];
+        }
+        return null;
+    }
+
     public function validateHostHeader()
     {
-        if (!isset($_SERVER['HTTP_HOST'])) {
-            return null;
+        $hostsToCheck = [];
+        if (isset($_SERVER['HTTP_HOST'])) {
+            $hostsToCheck['HTTP_HOST'] = (string)$_SERVER['HTTP_HOST'];
+        }
+        if (isset($_SERVER['HTTP_X_FORWARDED_HOST'])) {
+            $hostsToCheck['HTTP_X_FORWARDED_HOST'] = (string)$_SERVER['HTTP_X_FORWARDED_HOST'];
         }
 
-        $host = (string)$_SERVER['HTTP_HOST'];
-        if ($host === '') {
-            return null;
-        }
+        foreach ($hostsToCheck as $headerKey => $host) {
+            if ($host === '') {
+                continue;
+            }
 
-        // Reject newlines, carriage returns, null bytes (HTTP response splitting & request smuggling)
-        if (preg_match('/[\r\n\0]/', $host)) {
-            return [
-                'rule'    => 'HOST_HEADER_INJECTION',
-                'detail'  => 'Newline or null byte detected in HTTP Host header',
-                'payload' => substr($host, 0, 64),
-            ];
-        }
+            // Reject newlines, carriage returns, null bytes (HTTP response splitting & request smuggling)
+            if (preg_match('/[\r\n\0]/', $host)) {
+                return [
+                    'rule'    => 'HOST_HEADER_INJECTION',
+                    'detail'  => 'Newline or null byte detected in ' . $headerKey,
+                    'payload' => substr($host, 0, 64),
+                ];
+            }
 
-        // Reject invalid host format (must be alphanumeric, dots, hyphens, and optional port :8080)
-        if (!preg_match('/^[a-zA-Z0-9.\-_]+(?::\d{1,5})?$/', $host)) {
-            return [
-                'rule'    => 'MALFORMED_HOST_HEADER',
-                'detail'  => 'Illegal characters in HTTP Host header',
-                'payload' => substr($host, 0, 64),
-            ];
+            // Reject invalid host format (must be alphanumeric, dots, hyphens, and optional port :8080)
+            $parts = explode(',', $host);
+            foreach ($parts as $p) {
+                $trimmed = trim($p);
+                if ($trimmed !== '' && !preg_match('/^[a-zA-Z0-9.\-_]+(?::\d{1,5})?$/', $trimmed)) {
+                    return [
+                        'rule'    => 'MALFORMED_HOST_HEADER',
+                        'detail'  => 'Illegal characters in ' . $headerKey,
+                        'payload' => substr($trimmed, 0, 64),
+                    ];
+                }
+            }
         }
 
         return null;

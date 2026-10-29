@@ -20,7 +20,13 @@ return function($guard) {
             return null;
         }
 
-        $decoded = urldecode($value);
+        $decoded = $value;
+        for ($p = 0; $p < 3; $p++) {
+            if (strpos($decoded, '%') === false) break;
+            $prev = $decoded;
+            $decoded = rawurldecode($decoded);
+            if ($decoded === $prev) break;
+        }
 
         // Exploit vector: CVE-2024-2961 & PHP Filter Chain Generator
         // Long chains of convert.iconv.* or convert.base64-decode used to trigger heap corruption or generate arbitrary content
