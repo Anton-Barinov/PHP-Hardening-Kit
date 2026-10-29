@@ -8,11 +8,14 @@
 
 return function($guard) {
     // 1. Check for Null-Byte poisoning (%00 / \0) across all input vectors
-    $checkNullByte = function($value, &$ruleOut) use (&$checkNullByte) {
+    $checkNullByte = function($value, &$ruleOut, $depth = 0) use (&$checkNullByte) {
+        if ($depth > 32) {
+            return null; // Bound recursion depth to prevent stack exhaustion on adversarial arrays
+        }
         if (is_array($value)) {
             foreach ($value as $k => $v) {
-                if ($res = $checkNullByte($k, $ruleOut)) return $res;
-                if ($res = $checkNullByte($v, $ruleOut)) return $res;
+                if ($res = $checkNullByte($k, $ruleOut, $depth + 1)) return $res;
+                if ($res = $checkNullByte($v, $ruleOut, $depth + 1)) return $res;
             }
             return null;
         }
@@ -59,10 +62,13 @@ return function($guard) {
 
     // 3. Exploit vector: mail() sendmail 5th parameter injection (CVE-2016-10033 / CVE-2016-10045)
     // and subshell injection in mail parameters
-    $checkMailInjection = function($key, $value, &$ruleOut) use (&$checkMailInjection) {
+    $checkMailInjection = function($key, $value, &$ruleOut, $depth = 0) use (&$checkMailInjection) {
+        if ($depth > 32) {
+            return null; // Bound recursion depth
+        }
         if (is_array($value)) {
             foreach ($value as $k => $v) {
-                if ($res = $checkMailInjection($k, $v, $ruleOut)) return $res;
+                if ($res = $checkMailInjection($k, $v, $ruleOut, $depth + 1)) return $res;
             }
             return null;
         }
