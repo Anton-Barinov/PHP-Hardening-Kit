@@ -6,9 +6,13 @@
   "authors": [
     {
       "name": "Anton Barinov",
+      "email": "55404783+Anton-Barinov@users.noreply.github.com",
       "homepage": "https://github.com/Anton-Barinov"
     }
   ],
+  "scripts": {
+    "test": "php tests/run_tests.php"
+  },
   "require": {
     "php": ">=5.4.0"
   },
