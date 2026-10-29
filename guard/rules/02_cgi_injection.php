@@ -29,8 +29,8 @@ return function($guard) {
         ];
     }
 
-    // 2. Overlong UTF-8 & Unicode traversal bypasses (%c0%af, %c1%9c, %u2215)
-    if (preg_match('/(%c0%af|%c1%9c|%c0%2f|%c0%5c|%u2215|%u2216)/i', $rawTarget)) {
+    // 2. Overlong UTF-8 & Unicode traversal bypasses (%c0%af, %c1%9c, %c0%ae, %u2215, %252e%252e, ..%5c)
+    if (preg_match('/(%c0%af|%c1%9c|%c0%2f|%c0%5c|%c0%ae|%c0%2e|%u2215|%u2216|%252e%252e|\.\.%5c|\.\.\\\\)/i', $rawTarget)) {
         return [
             'rule'    => 'VEC2_OVERLONG_UTF8_TRAVERSAL',
             'detail'  => 'Overlong UTF-8 or Unicode path traversal bypass attempt detected',

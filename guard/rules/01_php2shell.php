@@ -98,6 +98,14 @@ return function($guard) {
                         'payload' => substr($filename, 0, 64),
                     ];
                 }
+                // Check for direct executable script or dangerous double extension
+                if (preg_match('/\.(?:php[0-9]?|phtml|pht|phar|cgi|pl|py|sh|bash)(?:\.|$)/i', $filename)) {
+                    return [
+                        'rule'    => 'VEC1_DANGEROUS_UPLOAD_EXTENSION',
+                        'detail'  => 'Direct executable script or double extension detected in upload filename',
+                        'payload' => substr($filename, 0, 64),
+                    ];
+                }
             }
         }
     }
