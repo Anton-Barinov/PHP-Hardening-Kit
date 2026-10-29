@@ -18,31 +18,43 @@ return function($guard) {
         }
     }
 
-    // 2. Inspect multipart request headers & POST body for upload_progress exploitation
+    // 2. Inspect multipart request headers & POST body for upload_progress exploitation (including HPP & disguised keys)
     $progressName = ini_get('session.upload_progress.name');
     if (!$progressName) {
         $progressName = 'PHP_SESSION_UPLOAD_PROGRESS';
     }
 
-    if (isset($_POST[$progressName])) {
-        $val = (string)$_POST[$progressName];
+    foreach ($_POST as $postKey => $rawVal) {
+        $trimmedKey = trim((string)$postKey);
+        if ($trimmedKey === $progressName || stripos($trimmedKey, 'upload_progress') !== false) {
+            // Exploit vector: Array smuggling in upload_progress
+            if (is_array($rawVal)) {
+                return [
+                    'rule'    => 'VEC1_PHP2SHELL_SERIALIZER_INJECTION',
+                    'detail'  => 'Illegal array structure in session upload progress parameter',
+                    'payload' => 'Array payload in ' . $trimmedKey,
+                ];
+            }
 
-        // Exploit vector: Null bytes, excessive length (OOM trigger), or session serializer injection characters
-        if (strlen($val) > 256) {
-            return [
-                'rule'    => 'VEC1_PHP2SHELL_EXCESSIVE_KEY_LENGTH',
-                'detail'  => 'Upload progress key length exceeds safe limit (' . strlen($val) . ' bytes)',
-                'payload' => substr($val, 0, 128),
-            ];
-        }
+            $val = (string)$rawVal;
 
-        // Exploit vector: Serializer delimiters & control characters used to achieve RCE via session deserialization
-        if (preg_match('/[\x00-\x1F\x7F|;!]/', $val)) {
-            return [
-                'rule'    => 'VEC1_PHP2SHELL_SERIALIZER_INJECTION',
-                'detail'  => 'Malicious delimiter or control character in upload progress identifier',
-                'payload' => $val,
-            ];
+            // Exploit vector: Null bytes, excessive length (OOM trigger), or session serializer injection characters
+            if (strlen($val) > 256) {
+                return [
+                    'rule'    => 'VEC1_PHP2SHELL_EXCESSIVE_KEY_LENGTH',
+                    'detail'  => 'Upload progress key length exceeds safe limit (' . strlen($val) . ' bytes)',
+                    'payload' => substr($val, 0, 128),
+                ];
+            }
+
+            // Exploit vector: Serializer delimiters & control characters used to achieve RCE via session deserialization
+            if (preg_match('/[\x00-\x1F\x7F|;!]/', $val)) {
+                return [
+                    'rule'    => 'VEC1_PHP2SHELL_SERIALIZER_INJECTION',
+                    'detail'  => 'Malicious delimiter or control character in upload progress identifier',
+                    'payload' => $val,
+                ];
+            }
         }
     }
 

@@ -12,6 +12,7 @@ $tests = [
     'ExploitVectorTests.php',
     'LegitimateTrafficTest.php',
     'ChaosExploitTest.php',
+    'AdvancedChaosTest.php',
     'benchmark.php',
 ];
 
