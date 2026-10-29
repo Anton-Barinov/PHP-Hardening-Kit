@@ -26,7 +26,13 @@ return function($guard) {
             return null;
         }
 
-        $decoded = urldecode($value);
+        $decoded = $value;
+        for ($p = 0; $p < 3; $p++) {
+            if (strpos($decoded, '%') === false) break;
+            $prev = $decoded;
+            $decoded = rawurldecode($decoded);
+            if ($decoded === $prev) break;
+        }
 
         // Exploit vector: CVE-2018-17082 - Phar stream wrapper injection in file paths
         // Any filesystem function (file_exists, is_dir, getimagesize, file_get_contents)
